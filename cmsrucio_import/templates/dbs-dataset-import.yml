@@ -1,0 +1,38 @@
+kind: DBSDatasetImport
+
+metadata:
+  name: import-legacy-crab-dataset
+
+specs:
+  dataset: /PrimaryDataset/clange-ProcessedDataset/USER
+  dbsInstance: phys03
+  includeInvalidFiles: false
+
+  # Optional when every DBS block has the same origin_site_name.
+  source:
+    rse: T3_CH_PSI
+
+  destination:
+    # The temporary RSE must be paired with the source RSE.
+    tempRSE: T3_CH_PSI_Temp
+    rse: T3_CH_PSI
+
+  # Preserve the full CRAB directory structure below the username.
+  lfnRewrite:
+    from: /store/user/clange/
+    to: /store/user/rucio/clange/
+
+  # The container defaults to the DBS dataset name. Override only if needed:
+  # collection:
+  #   containerName: /PrimaryDataset/clange-ProcessedDataset-imported/USER
+
+  rule:
+    copies: 1
+    lifetime: 1200000
+
+  options:
+    # Change to false only after inspecting the manifest and quota result.
+    dryRun: true
+    manifestPath: dbs-dataset-import-manifest.json
+    # Validate this many source files and gfal-copy paths without copying.
+    preflightFiles: 1

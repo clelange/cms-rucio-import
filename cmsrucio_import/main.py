@@ -1,11 +1,24 @@
 #!/usr/bin/python3
-import re
 import logging
-import typer
+import re
 from enum import Enum
-from strictyaml import Map, Str, Int, Seq, Optional
-from strictyaml import load, YAMLValidationError
+
+import typer
 from rucio.client import Client
+from strictyaml import Bool, Int, Map, Optional, Seq, Str, YAMLValidationError, load
+
+from .dbs_import import (
+    DBSDatasetImporter,
+    DBSReader,
+    DBSRequestError,
+    ImportConfig,
+    ImportConfigurationError,
+    ImportPreflightError,
+    MetadataConflictError,
+    TransferError,
+    build_manifest,
+    check_quota,
+)
 
 # from cms_rucio_import.lib.did_upload import datasetSchema, fileSchema, upload_dataset_and_create_rule, upload_file_and_create_rule, TemplateType
 
@@ -116,6 +129,86 @@ def upload_dataset_yaml(yamlfile: str):
         rucio_client, dataset_path, dataset_name, rule_params, upload_params)
 
 
+@app.command("import-dbs-dataset-yaml")
+def import_dbs_dataset_yaml(yamlfile: str):
+    """Import a legacy DBS dataset through a CMS temporary RSE."""
+
+    with open(yamlfile) as f:
+        yaml_string = f.read()
+
+    try:
+        params = load(yaml_string=yaml_string, schema=dbsDatasetImportSchema).data
+        if params["kind"] != "DBSDatasetImport":
+            raise ImportConfigurationError(
+                "kind must be DBSDatasetImport for this command"
+            )
+        config = ImportConfig.from_specs(params["specs"])
+        rucio_client = Client()
+        dbs_reader = DBSReader(config.dbs_instance)
+        manifest = build_manifest(config, dbs_reader, rucio_client)
+
+        typer.echo(
+            f"Resolved {len(manifest.files)} files in {len(manifest.blocks)} blocks "
+            f"({_human_bytes(manifest.total_bytes)})"
+        )
+        typer.echo(
+            f"Source {manifest.source_rse} -> temporary {manifest.temp_rse} "
+            f"-> target {manifest.target_rse}"
+        )
+
+        if config.manifest_path:
+            manifest.write(config.manifest_path)
+            typer.echo(f"Manifest written to {config.manifest_path}")
+
+        quota = check_quota(rucio_client, manifest)
+        quota_message = (
+            f"Quota check: {quota.reason}; required {_human_bytes(quota.required)}"
+        )
+        if quota.available:
+            typer.echo(quota_message)
+        else:
+            typer.echo(f"WARNING: {quota_message}", err=True)
+
+        importer = DBSDatasetImporter(rucio_client)
+        if config.preflight_files:
+            importer.preflight_transfers(manifest, config.preflight_files)
+            typer.echo(
+                f"Validated {min(config.preflight_files, len(manifest.files))} "
+                "source file(s) and temporary copy path(s)"
+            )
+
+        if config.dry_run:
+            typer.echo("Dry run complete; no files or Rucio objects were changed")
+            return
+
+        rule_id = importer.execute(manifest)
+        typer.echo(f"Import registered; replication rule: {rule_id}")
+        typer.echo(
+            f"Rule: https://cms-rucio-webui.cern.ch/rule?rule_id={rule_id}"
+        )
+    except YAMLValidationError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=2)
+    except (
+        ImportConfigurationError,
+        DBSRequestError,
+        ImportPreflightError,
+        MetadataConflictError,
+        TransferError,
+    ) as error:
+        typer.echo(f"Import failed: {error}", err=True)
+        raise typer.Exit(code=1)
+
+
+def _human_bytes(value: int) -> str:
+    amount = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB", "PiB"):
+        if amount < 1024 or unit == "PiB":
+            return f"{amount:.2f} {unit}"
+        amount /= 1024
+    return f"{amount:.2f} PiB"
+
+
 @app.command()
 def generate_yaml_template(type: TemplateType = typer.Argument(..., case_sensitive=False), dest: str = typer.Argument(".")):
     # TODO
@@ -171,6 +264,40 @@ fileSchema = Map(
             }),
 
         })
+    }
+)
+
+
+dbsDatasetImportSchema = Map(
+    {
+        "kind": Str(),
+        Optional("metadata"): Map({"name": Str()}),
+        "specs": Map({
+            "dataset": Str(),
+            Optional("dbsInstance"): Str(),
+            Optional("includeInvalidFiles"): Bool(),
+            Optional("source"): Map({Optional("rse"): Str()}),
+            "destination": Map({
+                "tempRSE": Str(),
+                "rse": Str(),
+            }),
+            "lfnRewrite": Map({
+                "from": Str(),
+                "to": Str(),
+            }),
+            Optional("collection"): Map({
+                Optional("containerName"): Str(),
+            }),
+            "rule": Map({
+                "copies": Int(),
+                "lifetime": Int(),
+            }),
+            Optional("options"): Map({
+                Optional("dryRun"): Bool(),
+                Optional("manifestPath"): Str(),
+                Optional("preflightFiles"): Int(),
+            }),
+        }),
     }
 )
 
@@ -512,4 +639,3 @@ def tfc_lfn2pfn(lfn, tfc, proto, depth=0):
 
     raise ValueError(
         "lfn %s with proto %s cannot be matched by tfc %s" % (lfn, proto, tfc))
-
