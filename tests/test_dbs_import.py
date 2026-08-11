@@ -1,10 +1,12 @@
 import unittest
+from unittest.mock import Mock
 
 from cmsrucio_import.dbs_import import (
     DBSBlock,
     DBSDatasetImporter,
     DBSFile,
     DBSReader,
+    GfalTransfer,
     ImportConfig,
     ImportConfigurationError,
     build_manifest,
@@ -370,6 +372,41 @@ class ManifestTests(unittest.TestCase):
         missing = check_quota(FakeRucioClient(quota=None), manifest)
         self.assertFalse(missing.available)
         self.assertIn("no quota", missing.reason)
+
+    def test_copy_preflight_validates_an_existing_temporary_file(self):
+        item = build_manifest(
+            make_config(), FakeDBSReader(), FakeRucioClient()
+        ).files[0]
+        transfer = object.__new__(GfalTransfer)
+        transfer.stat_size = Mock(return_value=item.size)
+        transfer.validate = Mock()
+        transfer._run = Mock()
+
+        transfer.dry_run_copy(item)
+
+        transfer.stat_size.assert_called_once_with(item.temp_pfn)
+        transfer.validate.assert_called_once_with(
+            item.temp_pfn, item.size, item.adler32
+        )
+        transfer._run.assert_not_called()
+
+    def test_copy_preflight_dry_runs_when_temporary_file_is_absent(self):
+        item = build_manifest(
+            make_config(), FakeDBSReader(), FakeRucioClient()
+        ).files[0]
+        transfer = object.__new__(GfalTransfer)
+        transfer.stat_size = Mock(return_value=None)
+        transfer.validate = Mock()
+        transfer._run = Mock()
+
+        transfer.dry_run_copy(item)
+
+        transfer.validate.assert_called_once_with(
+            item.source_pfn, item.size, item.adler32
+        )
+        command = transfer._run.call_args.args[0]
+        self.assertIn("--dry-run", command)
+        self.assertEqual(command[-2:], (item.source_pfn, item.temp_pfn))
 
     def test_execute_creates_hierarchy_rule_and_replicas(self):
         client = FakeRucioClient()

@@ -787,6 +787,10 @@ class GfalTransfer:
             )
 
     def dry_run_copy(self, item: ManifestFile) -> None:
+        existing_size = self.stat_size(item.temp_pfn)
+        if existing_size is not None:
+            self.validate(item.temp_pfn, item.size, item.adler32)
+            return
         self.validate(item.source_pfn, item.size, item.adler32)
         self._run(
             (
