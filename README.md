@@ -31,26 +31,81 @@ python -m cmsrucio_import --help
 ## Import a DBS dataset
 
 Copy and edit
-`cmsrucio_import/templates/dbs-dataset-import.yml`. The important fields are:
+`cmsrucio_import/templates/dbs-dataset-import.yml`. Only `dataset` is required.
+The safe minimal form is:
+
+```yaml
+kind: DBSDatasetImport
+specs:
+  dataset: /Primary/Processed/USER
+  options:
+    dryRun: true
+    manifestPath: dbs-dataset-import-manifest.json
+```
+
+The importer derives the normal same-site values as follows:
 
 - `dataset`: exact DBS `/primary/processed/tier` name;
-- `dbsInstance`: normally `phys03` for CRAB-published user datasets;
-- `includeInvalidFiles`: defaults to `false`; set it deliberately when the
+- `dbsInstance` defaults to `phys03` for CRAB-published user datasets;
+- `includeInvalidFiles` defaults to `false`; set it deliberately when the
   physical files still exist but DBS records were invalidated;
-- `source.rse`: the RSE holding the legacy `/store/user/<name>/...` files. It
-  can be omitted only when every imported DBS block has one common RSE-like
-  `origin_site_name`;
-- `destination.tempRSE`: the source site's paired temporary RSE, for example
-  `T3_CH_PSI_Temp` for `T3_CH_PSI`;
-- `destination.rse`: the final RSE on which the replication rule is created;
-- `lfnRewrite`: replaces the legacy user prefix while preserving the complete
-  CRAB directory structure below it;
+- `rucioScope` defaults to the account's sole owned scope; set it explicitly
+  when the account owns more than one;
+- the source RSE is the one common `origin_site_name` of the imported DBS
+  blocks;
+- the temporary RSE is `<source RSE>_Temp`, and the final RSE defaults to the
+  source RSE;
+- the source LFN prefix is the one common `/store/user/<owner>/` or
+  `/store/group/<group>/` root;
+- the target LFN prefix follows the scope type:
+  `/store/{user,group}/rucio/$RUCIO_ACCOUNT/`;
+- user-scope imports default to temporary prefix
+  `/store/temp/user/rucio/$RUCIO_ACCOUNT/`; group imports require an explicit
+  `destination.tempLFNPrefix` below the submitting user's `/store/temp/user/`
+  area;
 - `collection.containerName`: optional; defaults to the DBS dataset name;
-- `rule`: one target copy and its lifetime in seconds;
+- `rule.copies` defaults to one; an omitted `rule.lifetime` creates a permanent
+  rule;
 - `options.dryRun`: defaults to `true`;
 - `options.manifestPath`: optional JSON manifest destination;
 - `options.preflightFiles`: number of source files for which to verify size,
   checksum, and a `gfal-copy --dry-run` path.
+
+`source`, `destination`, `lfnRewrite`, `collection`, and `rule` remain optional
+overrides. An explicit `lfnRewrite.from` is needed only if the files do not use
+one standard user/group root. `lfnRewrite.to`, when supplied, must still equal
+the authenticated account's managed namespace.
+
+Source and target ownership are intentionally separate. With personal account
+`clange`, for example:
+
+```text
+/store/group/cmst3/group/hplushf/NanoTuples/...
+    -> /store/user/rucio/clange/group/hplushf/NanoTuples/...
+```
+
+Creating a group-owned target namespace is a different authorization model and
+is not inferred merely because the legacy files live below `/store/group`. It
+requires authentication as the group account and a group scope owned by that
+account. For example, account `t2_ch_cscs_local_users` with scope
+`group.t2_ch_cscs` maps to:
+
+```text
+/store/group/rucio/t2_ch_cscs_local_users/...
+```
+
+The corresponding temporary PFN must not use `/store/temp/group`. CMS group
+output is staged through a personal CRAB-style prefix, independently of its
+final group DID name:
+
+```yaml
+destination:
+  tempLFNPrefix: /store/temp/user/<username>.<DN-hash>/dataset-import/
+```
+
+`gfal-copy --dry-run` validates the resolved URLs but does not test WebDAV
+write authorization. A real copy can still fail if the configured personal
+temporary prefix is not writable by the proxy identity.
 
 Run a dry import with:
 

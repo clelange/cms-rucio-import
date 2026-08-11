@@ -13,7 +13,7 @@ import os
 import re
 import shutil
 import subprocess
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +25,7 @@ import requests
 LOGGER = logging.getLogger("dbs-dataset-import")
 _DATASET_RE = re.compile(r"^/[^/]+/[^/]+/[^/]+$")
 _ADLER32_RE = re.compile(r"^[0-9a-fA-F]{1,8}$")
+_LEGACY_LFN_ROOT_RE = re.compile(r"^/store/(?:user|group)/[^/]+/")
 
 
 class ImportConfigurationError(ValueError):
@@ -121,8 +122,11 @@ class ImportManifest:
     source_rse: str
     temp_rse: str
     target_rse: str
+    source_lfn_prefix: str
+    temp_lfn_prefix: str
+    target_lfn_prefix: str
     copies: int
-    lifetime: int
+    lifetime: int | None
     blocks: tuple[ManifestBlock, ...]
     files: tuple[ManifestFile, ...]
 
@@ -149,14 +153,16 @@ class ImportConfig:
     dataset: str
     dbs_instance: str
     include_invalid_files: bool
+    rucio_scope: str | None
     source_rse: str | None
-    temp_rse: str
-    target_rse: str
-    lfn_from: str
-    lfn_to: str
+    temp_rse: str | None
+    target_rse: str | None
+    temp_lfn_prefix: str | None
+    lfn_from: str | None
+    lfn_to: str | None
     container: str
     copies: int
-    lifetime: int
+    lifetime: int | None
     dry_run: bool
     manifest_path: str | None
     preflight_files: int
@@ -170,38 +176,60 @@ class ImportConfig:
             )
 
         source = specs.get("source", {})
-        destination = specs["destination"]
-        rewrite = specs["lfnRewrite"]
+        destination = specs.get("destination", {})
+        rewrite = specs.get("lfnRewrite", {})
         collection = specs.get("collection", {})
-        rule = specs["rule"]
+        rule = specs.get("rule", {})
         options = specs.get("options", {})
 
-        copies = int(rule["copies"])
-        lifetime = int(rule["lifetime"])
+        copies = int(rule.get("copies", 1))
+        raw_lifetime = rule.get("lifetime")
+        lifetime = int(raw_lifetime) if raw_lifetime is not None else None
         preflight_files = int(options.get("preflightFiles", 0))
         if copies != 1:
             raise ImportConfigurationError(
                 "This importer currently requires copies: 1 for an exact target RSE"
             )
-        if lifetime <= 0:
+        if lifetime is not None and lifetime <= 0:
             raise ImportConfigurationError(
                 "Rule lifetime must be a positive number of seconds"
             )
         if preflight_files < 0:
             raise ImportConfigurationError("preflightFiles cannot be negative")
 
-        lfn_from = str(rewrite["from"])
-        lfn_to = str(rewrite["to"])
-        if not lfn_from.endswith("/") or not lfn_to.endswith("/"):
-            raise ImportConfigurationError("LFN rewrite prefixes must end in '/'")
+        lfn_from = str(rewrite["from"]) if rewrite.get("from") else None
+        lfn_to = str(rewrite["to"]) if rewrite.get("to") else None
+        temp_lfn_prefix = (
+            str(destination["tempLFNPrefix"])
+            if destination.get("tempLFNPrefix")
+            else None
+        )
+        for prefix in (lfn_from, lfn_to, temp_lfn_prefix):
+            if prefix is not None and not prefix.endswith("/"):
+                raise ImportConfigurationError("LFN prefixes must end in '/'")
+        if temp_lfn_prefix and not temp_lfn_prefix.startswith("/store/temp/user/"):
+            raise ImportConfigurationError(
+                "destination.tempLFNPrefix must use the submitting user's "
+                f"/store/temp/user namespace, got {temp_lfn_prefix}"
+            )
 
         return cls(
             dataset=dataset,
             dbs_instance=str(specs.get("dbsInstance", "phys03")),
             include_invalid_files=bool(specs.get("includeInvalidFiles", False)),
+            rucio_scope=(
+                str(specs["rucioScope"]) if specs.get("rucioScope") else None
+            ),
             source_rse=str(source["rse"]) if source.get("rse") else None,
-            temp_rse=str(destination["tempRSE"]),
-            target_rse=str(destination["rse"]),
+            temp_rse=(
+                str(destination["tempRSE"])
+                if destination.get("tempRSE")
+                else None
+            ),
+            target_rse=(
+                str(destination["rse"]) if destination.get("rse") else None
+            ),
+            temp_lfn_prefix=temp_lfn_prefix,
             lfn_from=lfn_from,
             lfn_to=lfn_to,
             container=str(collection.get("containerName", dataset)),
@@ -364,13 +392,61 @@ def _resolve_pfns(
     return resolved
 
 
-def _temp_lfn(target_lfn: str) -> str:
-    prefix = "/store/user/"
-    if not target_lfn.startswith(prefix):
+def _resolve_account_scope(config: ImportConfig, rucio_client: Any) -> str:
+    account = str(rucio_client.account)
+    try:
+        scopes = sorted(set(rucio_client.list_scopes_for_account(account)))
+    except Exception as error:
+        raise ImportPreflightError(
+            f"Could not list scopes owned by Rucio account {account}: {error}"
+        ) from error
+
+    if config.rucio_scope:
+        if config.rucio_scope not in scopes:
+            raise ImportConfigurationError(
+                f"Rucio account {account} does not own configured scope "
+                f"{config.rucio_scope}; available scopes: {scopes}"
+            )
+        scope = config.rucio_scope
+    elif len(scopes) == 1:
+        scope = scopes[0]
+    else:
         raise ImportConfigurationError(
-            f"Target LFN is outside the CMS user namespace: {target_lfn}"
+            "rucioScope is required unless the authenticated account owns exactly "
+            f"one scope; account {account} owns {scopes}"
         )
-    return "/store/temp/user/" + target_lfn[len(prefix) :]
+
+    namespace = scope.partition(".")[0]
+    if namespace not in {"user", "group"}:
+        raise ImportConfigurationError(
+            f"Scope {scope} is not a CMS user or group scope"
+        )
+    return scope
+
+
+def _infer_source_lfn_prefix(files: Sequence[DBSFile]) -> str:
+    """Infer the legacy owner root shared by user- or group-produced files."""
+
+    prefixes: set[str] = set()
+    unsupported: list[str] = []
+    for item in files:
+        match = _LEGACY_LFN_ROOT_RE.match(item.source_lfn)
+        if match:
+            prefixes.add(match.group(0))
+        else:
+            unsupported.append(item.source_lfn)
+    if unsupported:
+        raise ImportPreflightError(
+            "Could not infer the legacy LFN root from /store/user/<owner>/ or "
+            "/store/group/<group>/; set lfnRewrite.from explicitly. First "
+            f"unsupported LFN: {unsupported[0]}"
+        )
+    if len(prefixes) != 1:
+        raise ImportPreflightError(
+            "lfnRewrite.from is required when files do not share one legacy "
+            f"user/group root; found {sorted(prefixes)}"
+        )
+    return next(iter(prefixes))
 
 
 def build_manifest(
@@ -412,14 +488,16 @@ def build_manifest(
         )
 
     expected_temp_rse = f"{source_rse}_Temp"
-    if config.temp_rse != expected_temp_rse:
+    temp_rse = config.temp_rse or expected_temp_rse
+    target_rse = config.target_rse or source_rse
+    if temp_rse != expected_temp_rse:
         raise ImportConfigurationError(
             "Same-storage imports require destination.tempRSE to be the source RSE's "
-            f"temporary RSE ({expected_temp_rse}), got {config.temp_rse}"
+            f"temporary RSE ({expected_temp_rse}), got {temp_rse}"
         )
 
     rse_info: dict[str, Mapping[str, Any]] = {}
-    for rse in (source_rse, config.temp_rse, config.target_rse):
+    for rse in dict.fromkeys((source_rse, temp_rse, target_rse)):
         try:
             rse_info[rse] = rucio_client.get_rse(rse)
         except Exception as error:
@@ -428,52 +506,78 @@ def build_manifest(
             ) from error
     if not rse_info[source_rse].get("deterministic"):
         raise ImportPreflightError(f"Source RSE {source_rse} must be deterministic")
-    if rse_info[config.temp_rse].get("deterministic"):
+    if rse_info[temp_rse].get("deterministic"):
         raise ImportPreflightError(
-            f"Temporary RSE {config.temp_rse} must be non-deterministic"
+            f"Temporary RSE {temp_rse} must be non-deterministic"
         )
-    if not rse_info[config.target_rse].get("deterministic"):
+    if not rse_info[target_rse].get("deterministic"):
         raise ImportPreflightError(
-            f"Target RSE {config.target_rse} must be deterministic"
+            f"Target RSE {target_rse} must be deterministic"
         )
     if rse_info[source_rse].get("availability_read") is False:
         raise ImportPreflightError(f"Source RSE {source_rse} is not readable")
-    for writable_rse in (config.temp_rse, config.target_rse):
+    for writable_rse in (temp_rse, target_rse):
         if rse_info[writable_rse].get("availability_write") is False:
             raise ImportPreflightError(f"RSE {writable_rse} is not writable")
 
     account = str(rucio_client.account)
-    scope = f"user.{account}"
-    expected_target_prefix = f"/store/user/rucio/{account}/"
-    if config.lfn_to != expected_target_prefix:
+    scope = _resolve_account_scope(config, rucio_client)
+    namespace = scope.partition(".")[0]
+    expected_target_prefix = f"/store/{namespace}/rucio/{account}/"
+    target_lfn_prefix = config.lfn_to or expected_target_prefix
+    if target_lfn_prefix != expected_target_prefix:
         raise ImportConfigurationError(
             f"lfnRewrite.to must be the account's managed namespace "
-            f"{expected_target_prefix}, got {config.lfn_to}"
+            f"{expected_target_prefix}, got {target_lfn_prefix}"
+        )
+    source_lfn_prefix = config.lfn_from or _infer_source_lfn_prefix(files)
+    if config.temp_lfn_prefix:
+        temp_lfn_prefix = config.temp_lfn_prefix
+    elif namespace == "user":
+        temp_lfn_prefix = f"/store/temp/user/rucio/{account}/"
+    else:
+        raise ImportConfigurationError(
+            "destination.tempLFNPrefix is required for group imports because "
+            "CMS stages group output through the submitting user's "
+            "/store/temp/user/<username>.<DN-hash>/ namespace"
         )
 
     target_lfns: dict[str, str] = {}
+    temp_lfns: dict[str, str] = {}
     seen_targets: set[str] = set()
+    seen_temps: set[str] = set()
     for item in files:
-        if not item.source_lfn.startswith(config.lfn_from):
+        if not item.source_lfn.startswith(source_lfn_prefix):
             raise ImportPreflightError(
-                f"Source LFN does not start with lfnRewrite.from: {item.source_lfn}"
+                "Source LFN does not start with the inferred/configured legacy "
+                f"root {source_lfn_prefix}: {item.source_lfn}"
             )
-        target_lfn = config.lfn_to + item.source_lfn[len(config.lfn_from) :]
+        target_lfn = (
+            target_lfn_prefix + item.source_lfn[len(source_lfn_prefix) :]
+        )
         if target_lfn in seen_targets:
             raise ImportPreflightError(f"LFN rewrite collision: {target_lfn}")
+        relative_lfn = item.source_lfn[len(source_lfn_prefix) :]
+        temp_lfn = temp_lfn_prefix + relative_lfn
+        if temp_lfn in seen_temps:
+            raise ImportPreflightError(f"Temporary LFN collision: {temp_lfn}")
         seen_targets.add(target_lfn)
+        seen_temps.add(temp_lfn)
         target_lfns[item.source_lfn] = target_lfn
+        temp_lfns[item.source_lfn] = temp_lfn
 
     source_lfns = [item.source_lfn for item in files]
-    temp_lfns = [_temp_lfn(target_lfns[item.source_lfn]) for item in files]
+    ordered_temp_lfns = [temp_lfns[item.source_lfn] for item in files]
     source_pfns = _resolve_pfns(rucio_client, source_rse, scope, source_lfns, "read")
     # The temporary RSE is non-deterministic.  Resolve its physical path with
     # the paired regular RSE's CMS TFC, exactly as CRAB/manual upload does.
-    temp_pfns = _resolve_pfns(rucio_client, source_rse, scope, temp_lfns, "write")
+    temp_pfns = _resolve_pfns(
+        rucio_client, source_rse, scope, ordered_temp_lfns, "write"
+    )
 
     manifest_files = []
     per_block: dict[str, list[DBSFile]] = {}
-    for item, temp_name in zip(files, temp_lfns):
+    for item, temp_name in zip(files, ordered_temp_lfns):
         source_pfn = source_pfns[item.source_lfn]
         temp_pfn = temp_pfns[temp_name]
         source_url = urlparse(source_pfn)
@@ -512,7 +616,7 @@ def build_manifest(
         )
 
     return ImportManifest(
-        version=1,
+        version=3,
         created_at=datetime.now(timezone.utc).isoformat(),
         account=account,
         scope=scope,
@@ -521,8 +625,11 @@ def build_manifest(
         include_invalid_files=config.include_invalid_files,
         container=config.container,
         source_rse=source_rse,
-        temp_rse=config.temp_rse,
-        target_rse=config.target_rse,
+        temp_rse=temp_rse,
+        target_rse=target_rse,
+        source_lfn_prefix=source_lfn_prefix,
+        temp_lfn_prefix=temp_lfn_prefix,
+        target_lfn_prefix=target_lfn_prefix,
         copies=config.copies,
         lifetime=config.lifetime,
         blocks=tuple(manifest_blocks),
@@ -725,16 +832,27 @@ class GfalTransfer:
 class DBSDatasetImporter:
     """Create and execute a resumable import manifest."""
 
-    def __init__(self, rucio_client: Any, transfer: GfalTransfer | None = None) -> None:
+    def __init__(
+        self,
+        rucio_client: Any,
+        transfer: GfalTransfer | None = None,
+        progress: Callable[[str], None] | None = None,
+    ) -> None:
         self.client = rucio_client
         self.transfer = transfer
+        self.progress = progress
+
+    def _report(self, message: str) -> None:
+        LOGGER.info(message)
+        if self.progress:
+            self.progress(message)
 
     def preflight_transfers(self, manifest: ImportManifest, count: int) -> None:
         if count <= 0:
             return
         transfer = self.transfer or GfalTransfer()
         for item in manifest.files[:count]:
-            LOGGER.info("Validating source and dry-run copy for %s", item.source_lfn)
+            self._report(f"Validating source and dry-run path: {item.source_lfn}")
             transfer.dry_run_copy(item)
 
     def execute(self, manifest: ImportManifest) -> str:
@@ -744,6 +862,7 @@ class DBSDatasetImporter:
             raise ImportPreflightError(quota.reason)
         transfer = self.transfer or GfalTransfer()
 
+        self._report("Preparing Rucio container and block datasets")
         self._ensure_did(manifest.scope, manifest.container, "CONTAINER")
         for block in manifest.blocks:
             self._ensure_did(manifest.scope, block.name, "DATASET")
@@ -756,15 +875,23 @@ class DBSDatasetImporter:
             ],
         )
         rule_id = existing_rule_id or self._ensure_rule(manifest)
+        self._report(f"Using replication rule {rule_id}")
 
         files_by_block: dict[str, list[ManifestFile]] = {}
         for item in manifest.files:
             files_by_block.setdefault(item.block, []).append(item)
-        for block in manifest.blocks:
+        for block_number, block in enumerate(manifest.blocks, start=1):
             block_files = files_by_block[block.name]
+            self._report(
+                f"Importing block {block_number}/{len(manifest.blocks)} "
+                f"({len(block_files)} files): {block.name}"
+            )
             for batch in _chunks(block_files, 100):
                 self._ensure_file_batch(manifest, block.name, list(batch), transfer)
             self.client.set_status(manifest.scope, block.name, open=False)
+            self._report(
+                f"Completed block {block_number}/{len(manifest.blocks)}: {block.name}"
+            )
         self.client.set_status(manifest.scope, manifest.container, open=False)
         return rule_id
 

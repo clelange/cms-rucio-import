@@ -155,6 +155,15 @@ def import_dbs_dataset_yaml(yamlfile: str):
             f"Source {manifest.source_rse} -> temporary {manifest.temp_rse} "
             f"-> target {manifest.target_rse}"
         )
+        typer.echo(f"Rucio account {manifest.account}, scope {manifest.scope}")
+        typer.echo(
+            f"LFN mapping {manifest.source_lfn_prefix} -> "
+            f"{manifest.target_lfn_prefix}"
+        )
+        typer.echo(
+            f"Temporary LFN mapping {manifest.source_lfn_prefix} -> "
+            f"{manifest.temp_lfn_prefix}"
+        )
 
         if config.manifest_path:
             manifest.write(config.manifest_path)
@@ -169,7 +178,7 @@ def import_dbs_dataset_yaml(yamlfile: str):
         else:
             typer.echo(f"WARNING: {quota_message}", err=True)
 
-        importer = DBSDatasetImporter(rucio_client)
+        importer = DBSDatasetImporter(rucio_client, progress=typer.echo)
         if config.preflight_files:
             importer.preflight_transfers(manifest, config.preflight_files)
             typer.echo(
@@ -276,21 +285,23 @@ dbsDatasetImportSchema = Map(
             "dataset": Str(),
             Optional("dbsInstance"): Str(),
             Optional("includeInvalidFiles"): Bool(),
+            Optional("rucioScope"): Str(),
             Optional("source"): Map({Optional("rse"): Str()}),
-            "destination": Map({
-                "tempRSE": Str(),
-                "rse": Str(),
+            Optional("destination"): Map({
+                Optional("tempRSE"): Str(),
+                Optional("tempLFNPrefix"): Str(),
+                Optional("rse"): Str(),
             }),
-            "lfnRewrite": Map({
-                "from": Str(),
-                "to": Str(),
+            Optional("lfnRewrite"): Map({
+                Optional("from"): Str(),
+                Optional("to"): Str(),
             }),
             Optional("collection"): Map({
                 Optional("containerName"): Str(),
             }),
-            "rule": Map({
-                "copies": Int(),
-                "lifetime": Int(),
+            Optional("rule"): Map({
+                Optional("copies"): Int(),
+                Optional("lifetime"): Int(),
             }),
             Optional("options"): Map({
                 Optional("dryRun"): Bool(),

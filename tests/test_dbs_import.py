@@ -72,6 +72,31 @@ class FakeDBSReader:
         ]
 
 
+class FakeGroupDBSReader(FakeDBSReader):
+    def list_blocks(self, dataset):
+        self.requested_dataset = dataset
+        return [
+            DBSBlock(BLOCK_A, "T2_CH_CSCS", 2, 30),
+            DBSBlock(BLOCK_B, "T2_CH_CSCS", 1, 30),
+        ]
+
+    def list_files(self, dataset, include_invalid=False):
+        files = super().list_files(dataset, include_invalid)
+        return [
+            DBSFile(
+                item.source_lfn.replace(
+                    "/store/user/clange/", "/store/group/cmst3/group/hplushf/"
+                ),
+                item.block,
+                item.size,
+                item.adler32,
+                item.valid,
+                item.event_count,
+            )
+            for item in files
+        ]
+
+
 class DataIdentifierNotFound(Exception):
     pass
 
@@ -79,7 +104,8 @@ class DataIdentifierNotFound(Exception):
 class FakeRucioClient:
     account = "clange"
 
-    def __init__(self, quota=1000):
+    def __init__(self, quota=1000, account="clange"):
+        self.account = account
         self.quota = quota
         self.dids = {}
         self.contents = {}
@@ -87,8 +113,18 @@ class FakeRucioClient:
         self.replicas = {}
         self.statuses = {}
 
+    def list_scopes_for_account(self, account):
+        if account == "t2_ch_cscs_local_users":
+            return ["group.t2_ch_cscs"]
+        return [f"user.{account}"]
+
     def get_rse(self, rse):
-        if rse not in {"T3_CH_PSI", "T3_CH_PSI_Temp"}:
+        if rse not in {
+            "T2_CH_CSCS",
+            "T2_CH_CSCS_Temp",
+            "T3_CH_PSI",
+            "T3_CH_PSI_Temp",
+        }:
             raise RuntimeError("unknown RSE")
         return {
             "rse": rse,
@@ -255,6 +291,65 @@ class ManifestTests(unittest.TestCase):
             "task/0000/tree_1.root",
         )
         self.assertEqual(first.event_count, 100)
+
+    def test_group_config_separates_personal_temp_and_group_target(self):
+        temp_prefix = (
+            "/store/temp/user/clange.examplehash/cmsrucio-dataset-import/"
+        )
+        config = ImportConfig.from_specs(
+            {
+                "dataset": DATASET,
+                "destination": {"tempLFNPrefix": temp_prefix},
+            }
+        )
+        client = FakeRucioClient(account="t2_ch_cscs_local_users")
+        manifest = build_manifest(config, FakeGroupDBSReader(), client)
+
+        self.assertTrue(config.dry_run)
+        self.assertEqual(config.dbs_instance, "phys03")
+        self.assertIsNone(config.lifetime)
+        self.assertEqual(manifest.scope, "group.t2_ch_cscs")
+        self.assertEqual(manifest.source_rse, "T2_CH_CSCS")
+        self.assertEqual(manifest.temp_rse, "T2_CH_CSCS_Temp")
+        self.assertEqual(manifest.target_rse, "T2_CH_CSCS")
+        self.assertEqual(manifest.source_lfn_prefix, "/store/group/cmst3/")
+        self.assertEqual(manifest.temp_lfn_prefix, temp_prefix)
+        self.assertEqual(
+            manifest.target_lfn_prefix,
+            "/store/group/rucio/t2_ch_cscs_local_users/",
+        )
+        self.assertEqual(
+            manifest.files[0].target_lfn,
+            "/store/group/rucio/t2_ch_cscs_local_users/group/hplushf/"
+            "task/0000/tree_1.root",
+        )
+        self.assertEqual(
+            manifest.files[0].temp_pfn,
+            "davs://t3se01.psi.ch:2880/store/temp/user/clange.examplehash/"
+            "cmsrucio-dataset-import/group/hplushf/task/0000/tree_1.root",
+        )
+
+    def test_group_import_requires_personal_temp_prefix(self):
+        config = ImportConfig.from_specs({"dataset": DATASET})
+        client = FakeRucioClient(account="t2_ch_cscs_local_users")
+        with self.assertRaises(ImportConfigurationError):
+            build_manifest(config, FakeGroupDBSReader(), client)
+
+    def test_group_temp_namespace_is_rejected(self):
+        with self.assertRaises(ImportConfigurationError):
+            ImportConfig.from_specs(
+                {
+                    "dataset": DATASET,
+                    "destination": {
+                        "tempLFNPrefix": "/store/temp/group/rucio/example/"
+                    },
+                }
+            )
+
+    def test_configured_scope_must_belong_to_account(self):
+        config = make_config(rucioScope="group.t2_ch_cscs")
+        with self.assertRaises(ImportConfigurationError):
+            build_manifest(config, FakeDBSReader(), FakeRucioClient())
 
     def test_wrong_temp_rse_is_rejected(self):
         config = make_config(

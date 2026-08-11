@@ -5,30 +5,6 @@ metadata:
 
 specs:
   dataset: /PrimaryDataset/clange-ProcessedDataset/USER
-  dbsInstance: phys03
-  includeInvalidFiles: false
-
-  # Optional when every DBS block has the same origin_site_name.
-  source:
-    rse: T3_CH_PSI
-
-  destination:
-    # The temporary RSE must be paired with the source RSE.
-    tempRSE: T3_CH_PSI_Temp
-    rse: T3_CH_PSI
-
-  # Preserve the full CRAB directory structure below the username.
-  lfnRewrite:
-    from: /store/user/clange/
-    to: /store/user/rucio/clange/
-
-  # The container defaults to the DBS dataset name. Override only if needed:
-  # collection:
-  #   containerName: /PrimaryDataset/clange-ProcessedDataset-imported/USER
-
-  rule:
-    copies: 1
-    lifetime: 1200000
 
   options:
     # Change to false only after inspecting the manifest and quota result.
@@ -36,3 +12,34 @@ specs:
     manifestPath: dbs-dataset-import-manifest.json
     # Validate this many source files and gfal-copy paths without copying.
     preflightFiles: 1
+
+  # Normal defaults, all inferred without configuration:
+  # - DBS instance: phys03; valid files only
+  # - source RSE: common DBS block origin_site_name
+  # - temporary RSE: <source RSE>_Temp
+  # - final RSE: source RSE
+  # - Rucio scope: the account's sole owned scope
+  # - source LFN root: /store/user/<owner>/ or /store/group/<group>/
+  # - personal temporary LFN root for user-scope imports:
+  #   /store/temp/user/rucio/$RUCIO_ACCOUNT/
+  # - target LFN root: /store/{user,group}/rucio/$RUCIO_ACCOUNT/
+  # - collection name: DBS dataset name
+  # - rule: one permanent copy
+
+  # Overrides are accepted for unusual layouts or deliberately different
+  # destinations. Set rucioScope when an account owns multiple scopes.
+  # rucioScope: group.example
+  # source:
+  #   rse: T3_CH_PSI
+  # destination:
+  #   tempRSE: T3_CH_PSI_Temp
+  #   # Required for group imports. CRAB always stages through the submitting
+  #   # user's temporary area, even when the final destination is a group LFN.
+  #   tempLFNPrefix: /store/temp/user/<username>.<DN-hash>/dataset-import/
+  #   rse: T3_CH_PSI
+  # lfnRewrite:
+  #   from: /an/unusual/common/source/prefix/
+  # collection:
+  #   containerName: /PrimaryDataset/clange-ProcessedDataset-imported/USER
+  # rule:
+  #   lifetime: 1200000
