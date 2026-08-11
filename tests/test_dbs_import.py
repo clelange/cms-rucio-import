@@ -111,6 +111,7 @@ class FakeRucioClient:
         self.contents = {}
         self.rules = []
         self.replicas = {}
+        self.replica_submissions = []
         self.statuses = {}
 
     def list_scopes_for_account(self, account):
@@ -192,6 +193,7 @@ class FakeRucioClient:
 
     def add_replicas(self, rse, files, ignore_availability=False):
         for item in files:
+            self.replica_submissions.append(dict(item))
             self.replicas[(item["scope"], item["name"])] = {
                 "scope": item["scope"],
                 "name": item["name"],
@@ -386,6 +388,10 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(len(client.contents[(manifest.scope, manifest.container)]), 2)
         self.assertEqual(len(client.contents[(manifest.scope, BLOCK_A)]), 2)
         self.assertEqual(len(client.replicas), 3)
+        self.assertTrue(client.replica_submissions)
+        self.assertTrue(
+            all("md5" not in item for item in client.replica_submissions)
+        )
         self.assertEqual(
             client.statuses[(manifest.scope, manifest.container)], {"open": False}
         )

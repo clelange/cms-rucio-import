@@ -993,7 +993,6 @@ class DBSDatasetImporter:
                         "name": item.target_lfn,
                         "bytes": item.size,
                         "adler32": item.adler32,
-                        "md5": None,
                         "meta": {},
                         "state": "A",
                         "pfn": item.temp_pfn,
