@@ -8,7 +8,7 @@ This package has two upload paths:
 
 ## Requirements
 
-Python 3.10 or newer is required. Run data transfers on `lxplus` or another CMS
+Python 3.9 or newer is required. Run data transfers on `lxplus` or another CMS
 UI host with `gfal-copy`, `gfal-stat`, and `gfal-sum` available. Initialise
 Rucio and a CMS proxy, then install the package:
 
