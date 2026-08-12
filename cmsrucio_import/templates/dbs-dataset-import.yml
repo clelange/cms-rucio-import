@@ -10,7 +10,8 @@ specs:
     # Change to false only after inspecting the manifest and quota result.
     dryRun: true
     manifestPath: dbs-dataset-import-manifest.json
-    # Validate this many source files and gfal-copy paths without copying.
+    # Preflight this many files. Existing temporary replicas are validated;
+    # missing ones trigger source and gfal-copy path validation without copying.
     preflightFiles: 1
 
   # Normal defaults, all inferred without configuration:
@@ -27,7 +28,8 @@ specs:
   # - rule: one permanent copy
 
   # Overrides are accepted for unusual layouts or deliberately different
-  # destinations. Set rucioScope when an account owns multiple scopes.
+  # destinations. Set rucioScope when an account owns multiple scopes. Group
+  # imports must also select an authorized group RUCIO_ACCOUNT in the shell.
   # rucioScope: group.example
   # source:
   #   rse: T3_CH_PSI

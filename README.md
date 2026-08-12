@@ -24,6 +24,14 @@ source .venv/bin/activate
 python -m pip install .
 ```
 
+`setup-py3.sh` does not set `RUCIO_ACCOUNT` automatically. The selected account
+must be authorized for the active proxy, and group-owned imports must select the
+corresponding group account. Verify the selection before importing:
+
+```shell
+rucio whoami
+```
+
 List commands with:
 
 ```shell
@@ -35,9 +43,11 @@ For development, install `.[test]` and run `python -m pytest`.
 
 ## Import a DBS dataset
 
-Copy and edit
-`cmsrucio_import/templates/dbs-dataset-import.yml`. Only `dataset` is required.
-The safe minimal form is:
+Copy and edit `cmsrucio_import/templates/dbs-dataset-import.yml`. For a normal
+user-scope import, `dataset` is the only required YAML value. Group-scope
+imports also require an explicit `destination.tempLFNPrefix`, and the shell
+must select an authorized group `RUCIO_ACCOUNT` as described below. The safe
+minimal user-scope form is:
 
 ```yaml
 kind: DBSDatasetImport
@@ -73,8 +83,10 @@ The importer derives the normal same-site values as follows:
   rule;
 - `options.dryRun`: defaults to `true`;
 - `options.manifestPath`: optional JSON manifest destination;
-- `options.preflightFiles`: number of source files for which to verify size,
-  checksum, and a `gfal-copy --dry-run` path.
+- `options.preflightFiles`: number of files to preflight. If the temporary
+  replica is missing, the importer verifies the source size and checksum and
+  runs `gfal-copy --dry-run`; if it already exists, the importer instead
+  verifies and reuses that temporary replica.
 
 `source`, `destination`, `lfnRewrite`, `collection`, and `rule` remain optional
 overrides. An explicit `lfnRewrite.from` is needed only if the files do not use
@@ -131,8 +143,8 @@ The importer performs these operations:
    for each imported DBS block.
 4. Creates the target replication rule.
 5. Copies each source file to the temporary RSE with size and checksum
-   validation, registers the temporary replica in `user.$RUCIO_ACCOUNT`, and
-   attaches it to its block dataset.
+   validation, registers the temporary replica in the resolved user or group
+   Rucio scope, and attaches it to its block dataset.
 6. Closes the block datasets and container after all files are registered.
 
 The operation is resumable. Existing collections, rules, and replicas are
