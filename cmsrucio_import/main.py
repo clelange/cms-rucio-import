@@ -337,8 +337,8 @@ def _human_bytes(value: int) -> str:
 @app.command()
 def generate_yaml_template(type: TemplateType = typer.Argument(..., case_sensitive=False), dest: str = typer.Argument(".")):
     # TODO
-    typer.echo(f"Under development")
-    typer.echo(f"Please copy files from src/rucio-user-dm/templates/")
+    typer.echo("Under development")
+    typer.echo("Use the YAML examples in cmsrucio_import/templates/.")
 
 
 ########### Schema Defination ###########

@@ -1,4 +1,0 @@
-requests>=2.28
-rucio-clients>=39,<40
-strictyaml>=1.7
-typer>=0.9

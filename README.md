@@ -8,25 +8,30 @@ This package has two upload paths:
 
 ## Requirements
 
-Run data transfers on `lxplus` or another CMS UI host with `gfal-copy`,
-`gfal-stat`, and `gfal-sum` available. Initialise Rucio and a CMS proxy, then
-install the Python dependencies:
+Python 3.10 or newer is required. Run data transfers on `lxplus` or another CMS
+UI host with `gfal-copy`, `gfal-stat`, and `gfal-sum` available. Initialise
+Rucio and a CMS proxy, then install the package:
 
 ```shell
 source /cvmfs/cms.cern.ch/rucio/setup-py3.sh
 voms-proxy-init -voms cms -rfc -valid 192:00
 export RUCIO_ACCOUNT="<CMS Rucio account>"
 
+git clone https://github.com/clelange/cms-rucio-import.git
+cd cms-rucio-import
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements.txt
+python -m pip install .
 ```
 
-From this directory, list commands with:
+List commands with:
 
 ```shell
-python -m cmsrucio_import --help
+cmsrucio-import --help
 ```
+
+`python -m cmsrucio_import` remains available as an equivalent invocation.
+For development, install `.[test]` and run `python -m pytest`.
 
 ## Import a DBS dataset
 
