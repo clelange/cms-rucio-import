@@ -138,6 +138,63 @@ Do not copy files directly into `/store/user/rucio/...`; that namespace is
 managed by Rucio. The importer writes to the source site's temporary RSE and
 lets the target rule create the managed replica.
 
+## Import a batch of DBS datasets
+
+Put one exact DBS dataset name per line in a text file. Empty lines and lines
+beginning with `#` are ignored; duplicates are rejected. Use one already-tested
+single-dataset YAML as the base configuration:
+
+```shell
+python -m cmsrucio_import plan-dbs-dataset-batch datasets.txt \
+  --base dbs-import-cscs.execute.yml \
+  --workdir dbs-import-batch
+```
+
+Planning does not create Rucio objects or copy files. It resolves every dataset,
+performs the configured transfer preflight, discovers exact matching rules, and
+checks aggregate quota for datasets that are not already complete. It creates:
+
+```text
+dbs-import-batch/
+├── batch-state.json
+├── base.yml
+├── datasets.txt
+├── rules.tsv
+├── configs/
+├── manifests/
+└── logs/
+```
+
+Every dataset gets a deterministic, collision-resistant temporary LFN prefix.
+An existing rule is skipped only when it is `OK` and its OK lock count equals
+the manifest's expected file-lock count; `OK` with zero locks is not complete.
+Inspect `rules.tsv`, the manifests, and the aggregate quota result before
+starting execution.
+
+Run the imports sequentially with:
+
+```shell
+python -m cmsrucio_import run-dbs-dataset-batch \
+  dbs-import-batch/batch-state.json
+```
+
+The runner registers one dataset, waits for all of its rule locks to become OK,
+and only then starts the next dataset. A stuck lock or an import error stops the
+batch. Interrupting the command is safe: rerun the identical command to resume.
+Registration failures resume through the checksum-validating importer, while an
+interrupted rule wait resumes at the wait without re-registering the dataset.
+Run long batches in `tmux` and ensure that the VOMS proxy remains valid.
+
+When no runner is active, refresh the rule ledger with:
+
+```shell
+python -m cmsrucio_import status-dbs-dataset-batch \
+  dbs-import-batch/batch-state.json
+```
+
+The JSON state file is the machine-readable record; `rules.tsv` is its compact
+human-readable projection. Per-dataset output is appended below `logs/`.
+
 ## Upload local files
 
 The original local upload commands remain available:

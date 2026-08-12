@@ -7,6 +7,13 @@ import typer
 from rucio.client import Client
 from strictyaml import Bool, Int, Map, Optional, Seq, Str, YAMLValidationError, load
 
+from .dbs_batch import (
+    BatchImportError,
+    load_batch_state,
+    plan_batch,
+    refresh_batch_status,
+    run_batch,
+)
 from .dbs_import import (
     DBSDatasetImporter,
     DBSReader,
@@ -206,6 +213,115 @@ def import_dbs_dataset_yaml(yamlfile: str):
         TransferError,
     ) as error:
         typer.echo(f"Import failed: {error}", err=True)
+        raise typer.Exit(code=1)
+
+
+@app.command("plan-dbs-dataset-batch")
+def plan_dbs_dataset_batch(
+    datasets_file: str,
+    base: str = typer.Option(..., "--base", help="Base DBSDatasetImport YAML"),
+    workdir: str = typer.Option(
+        "dbs-import-batch", "--workdir", help="Batch state and artifact directory"
+    ),
+    temp_lfn_root: str = typer.Option(
+        None,
+        "--temp-lfn-root",
+        help="Optional /store/temp/user/<owner>/ batch root",
+    ),
+):
+    """Resolve a dataset list and create an auditable, non-mutating batch plan."""
+
+    try:
+        with open(base) as source:
+            params = load(
+                yaml_string=source.read(), schema=dbsDatasetImportSchema
+            ).data
+        if params["kind"] != "DBSDatasetImport":
+            raise BatchImportError("The base YAML kind must be DBSDatasetImport")
+        state_path = plan_batch(
+            datasets_file,
+            params["specs"],
+            workdir,
+            Client(),
+            temp_lfn_root=temp_lfn_root,
+            progress=typer.echo,
+        )
+        state = load_batch_state(state_path)
+        completed = sum(
+            entry["status"] == "complete-existing"
+            for entry in state["entries"]
+        )
+        pending_bytes = sum(
+            entry.get("bytes", 0)
+            for entry in state["entries"]
+            if entry["status"] != "complete-existing"
+        )
+        typer.echo(
+            f"Batch plan written to {state_path}: {len(state['entries'])} datasets, "
+            f"{completed} already complete, {_human_bytes(pending_bytes)} pending"
+        )
+        for quota in state["quota"]:
+            typer.echo(
+                f"Aggregate quota {quota['target_rse']}: {quota['reason']}; "
+                f"required {_human_bytes(quota['required'])}"
+            )
+        if state["status"] == "quota-insufficient":
+            typer.echo("WARNING: aggregate quota is insufficient", err=True)
+            raise typer.Exit(code=1)
+    except YAMLValidationError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=2)
+    except BatchImportError as error:
+        typer.echo(f"Batch planning failed: {error}", err=True)
+        raise typer.Exit(code=1)
+
+
+@app.command("run-dbs-dataset-batch")
+def run_dbs_dataset_batch(
+    state_file: str,
+    poll_seconds: int = typer.Option(
+        60, "--poll-seconds", help="Seconds between replication-rule checks"
+    ),
+    rule_timeout: int = typer.Option(
+        0,
+        "--rule-timeout",
+        help="Per-rule timeout in seconds; zero waits indefinitely",
+    ),
+):
+    """Resume a batch, importing and fully replicating one dataset at a time."""
+
+    try:
+        state = run_batch(
+            state_file,
+            Client(),
+            poll_seconds=poll_seconds,
+            rule_timeout=rule_timeout,
+            progress=typer.echo,
+        )
+        typer.echo(
+            f"Batch complete: {len(state['entries'])}/{len(state['entries'])} datasets"
+        )
+    except BatchImportError as error:
+        typer.echo(f"Batch stopped: {error}", err=True)
+        raise typer.Exit(code=1)
+
+
+@app.command("status-dbs-dataset-batch")
+def status_dbs_dataset_batch(state_file: str):
+    """Refresh live rule counts and update the local batch ledger."""
+
+    try:
+        state = refresh_batch_status(state_file, Client(), progress=typer.echo)
+        completed = sum(
+            entry["status"] in {"complete", "complete-existing"}
+            for entry in state["entries"]
+        )
+        typer.echo(
+            f"Batch status: {completed}/{len(state['entries'])} complete; "
+            f"overall state {state['status']}"
+        )
+    except BatchImportError as error:
+        typer.echo(f"Could not refresh batch: {error}", err=True)
         raise typer.Exit(code=1)
 
 

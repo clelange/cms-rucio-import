@@ -147,6 +147,18 @@ class ImportManifest:
         path = Path(destination)
         path.write_text(json.dumps(self.to_dict(), indent=2, sort_keys=True) + "\n")
 
+    @classmethod
+    def read(cls, source: str | os.PathLike[str]) -> ImportManifest:
+        payload = json.loads(Path(source).read_text())
+        payload.pop("totals", None)
+        payload["blocks"] = tuple(
+            ManifestBlock(**item) for item in payload.get("blocks", [])
+        )
+        payload["files"] = tuple(
+            ManifestFile(**item) for item in payload.get("files", [])
+        )
+        return cls(**payload)
+
 
 @dataclass(frozen=True)
 class ImportConfig:
@@ -658,12 +670,17 @@ def _limit_value(raw_limit: Any) -> int | None:
     return int(raw_limit) if raw_limit is not None else None
 
 
-def check_quota(rucio_client: Any, manifest: ImportManifest) -> QuotaStatus:
+def check_quota(
+    rucio_client: Any,
+    manifest: ImportManifest,
+    *,
+    required_bytes: int | None = None,
+) -> QuotaStatus:
     """Check local and global account limits covering the exact target RSE."""
 
     account = manifest.account
     rse = manifest.target_rse
-    required = manifest.total_bytes
+    required = manifest.total_bytes if required_bytes is None else required_bytes
     local_limits = rucio_client.get_local_account_limits(account)
     if rse in local_limits:
         limit = _limit_value(local_limits[rse])
@@ -833,6 +850,27 @@ class GfalTransfer:
         return True
 
 
+def find_matching_rule(
+    rucio_client: Any, manifest: ImportManifest
+) -> Mapping[str, Any] | None:
+    """Return this account's exact matching rule for an import container."""
+
+    try:
+        rules = rucio_client.list_did_rules(manifest.scope, manifest.container)
+    except Exception as error:
+        if _exception_name(error) == "DataIdentifierNotFound":
+            return None
+        raise
+    for rule in rules:
+        if (
+            str(rule.get("account")) == manifest.account
+            and str(rule.get("rse_expression")) == manifest.target_rse
+            and int(rule.get("copies", 0)) == manifest.copies
+        ):
+            return rule
+    return None
+
+
 class DBSDatasetImporter:
     """Create and execute a resumable import manifest."""
 
@@ -860,7 +898,8 @@ class DBSDatasetImporter:
             transfer.dry_run_copy(item)
 
     def execute(self, manifest: ImportManifest) -> str:
-        existing_rule_id = self._matching_rule_id(manifest)
+        existing_rule = find_matching_rule(self.client, manifest)
+        existing_rule_id = str(existing_rule["id"]) if existing_rule else None
         quota = check_quota(self.client, manifest)
         if not quota.available and existing_rule_id is None:
             raise ImportPreflightError(quota.reason)
@@ -937,9 +976,9 @@ class DBSDatasetImporter:
             self.client.attach_dids(scope=scope, name=parent, dids=list(batch))
 
     def _ensure_rule(self, manifest: ImportManifest) -> str:
-        existing = self._matching_rule_id(manifest)
+        existing = find_matching_rule(self.client, manifest)
         if existing is not None:
-            return existing
+            return str(existing["id"])
         result = self.client.add_replication_rule(
             [{"scope": manifest.scope, "name": manifest.container}],
             manifest.copies,
@@ -948,22 +987,6 @@ class DBSDatasetImporter:
             grouping="DATASET",
         )
         return str(result[0])
-
-    def _matching_rule_id(self, manifest: ImportManifest) -> str | None:
-        try:
-            rules = self.client.list_did_rules(manifest.scope, manifest.container)
-        except Exception as error:
-            if _exception_name(error) == "DataIdentifierNotFound":
-                return None
-            raise
-        for rule in rules:
-            if (
-                str(rule.get("account")) == manifest.account
-                and str(rule.get("rse_expression")) == manifest.target_rse
-                and int(rule.get("copies", 0)) == manifest.copies
-            ):
-                return str(rule["id"])
-        return None
 
     def _ensure_file_batch(
         self,
