@@ -931,11 +931,11 @@ class DBSDatasetImporter:
             )
             for batch in _chunks(block_files, 100):
                 self._ensure_file_batch(manifest, block.name, list(batch), transfer)
-            self.client.set_status(manifest.scope, block.name, open=False)
+            self._ensure_closed(manifest.scope, block.name)
             self._report(
                 f"Completed block {block_number}/{len(manifest.blocks)}: {block.name}"
             )
-        self.client.set_status(manifest.scope, manifest.container, open=False)
+        self._ensure_closed(manifest.scope, manifest.container)
         return rule_id
 
     def _ensure_did(self, scope: str, name: str, did_type: str) -> None:
@@ -954,6 +954,12 @@ class DBSDatasetImporter:
             raise MetadataConflictError(
                 f"{scope}:{name} exists as {actual_type}, expected {did_type}"
             )
+
+    def _ensure_closed(self, scope: str, name: str) -> None:
+        info = self.client.get_did(scope, name)
+        if info.get("open") is False:
+            return
+        self.client.set_status(scope, name, open=False)
 
     def _attach_missing(
         self,

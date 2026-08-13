@@ -115,6 +115,8 @@ class FakeRucioClient:
         self.replicas = {}
         self.replica_submissions = []
         self.statuses = {}
+        self.status_calls = []
+        self.open_dids = {}
 
     def list_scopes_for_account(self, account):
         if account == "t2_ch_cscs_local_users":
@@ -157,11 +159,15 @@ class FakeRucioClient:
     def get_did(self, scope, name):
         if (scope, name) not in self.dids:
             raise DataIdentifierNotFound(name)
-        return {"type": self.dids[(scope, name)]}
+        return {
+            "type": self.dids[(scope, name)],
+            "open": self.open_dids[(scope, name)],
+        }
 
     def add_did(self, scope, name, did_type):
         self.dids[(scope, name)] = did_type
         self.contents[(scope, name)] = []
+        self.open_dids[(scope, name)] = True
         return True
 
     def list_content(self, scope, name):
@@ -206,7 +212,13 @@ class FakeRucioClient:
         return True
 
     def set_status(self, scope, name, **kwargs):
+        key = (scope, name)
+        if "open" in kwargs:
+            if self.open_dids[key] == kwargs["open"]:
+                raise RuntimeError(f"DID {scope}:{name} already has status {kwargs}")
+            self.open_dids[key] = kwargs["open"]
         self.statuses[(scope, name)] = kwargs
+        self.status_calls.append((scope, name, kwargs))
         return True
 
 
@@ -440,12 +452,14 @@ class ManifestTests(unittest.TestCase):
         DBSDatasetImporter(client, first_transfer).execute(manifest)
         client.quota = None
         resumed_transfer = FakeTransfer()
+        status_calls = list(client.status_calls)
 
         rule_id = DBSDatasetImporter(client, resumed_transfer).execute(manifest)
 
         self.assertEqual(rule_id, "rule-1")
         self.assertEqual(resumed_transfer.copied, [])
         self.assertEqual(len(client.rules), 1)
+        self.assertEqual(client.status_calls, status_calls)
 
 
 if __name__ == "__main__":
